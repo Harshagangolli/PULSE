@@ -77,7 +77,7 @@ MUTATIONS = [
      "TestCachedSources"),
 
     ("battery: read on every tick", "collect.py",
-     'if now - self._batt_at > 15.0 or not self._batt_at:',
+     'if not self._batt_at or now - self._batt_at > 2.0:',
      'if True:',
      "TestCachedSources"),
 
@@ -150,6 +150,61 @@ MUTATIONS = [
      '    part = _PART_DOWN if flip else _PART_UP',
      '    part = _PART_UP',
      "TestPlot"),
+
+    ("battery: bare current_now labelled as watts (the btop bug)", "collect.py",
+     "    return abs(ua) * uv / 1e12 if ua and uv else 0.0",
+     "    return abs(ua) / 1e6 if ua else 0.0",
+     "TestBattery"),
+
+    ("battery: wrong microwatt scale", "collect.py",
+     "        return abs(uw) / 1e6",
+     "        return abs(uw) / 1e3",
+     "TestBattery"),
+
+    ("battery: lose the sign on signed counters", "collect.py",
+     "        return abs(uw) / 1e6",
+     "        return uw / 1e6 if uw > 0 else 0.0",
+     "TestBattery"),
+
+    ("battery: prefer current over power_now", "collect.py",
+     '    uw = _readint(base + "/power_now", 0)\n    if uw:',
+     '    uw = _readint(base + "/power_now", 0)\n    if False:',
+     "TestBattery"),
+
+    ("battery: read flow off an idle cell", "collect.py",
+     '    return cap, status, _battery_watts(base) if direction else 0.0, direction',
+     '    return cap, status, _battery_watts(base), direction',
+     "TestBattery"),
+
+    ("battery: charging and discharging indistinguishable", "collect.py",
+     '    direction = {"Charging": "in", "Discharging": "out"}.get(status, "")',
+     '    direction = "out" if status else ""',
+     "TestBattery"),
+
+    ("battery: report a cell with no capacity", "collect.py",
+     "    if cap < 0:\n        return None",
+     "    if False:\n        return None",
+     "TestBattery"),
+
+    ("battery: accept any supply as a battery", "collect.py",
+     '                if _read(base + "/type").strip() == "Battery":',
+     '                if True:',
+     "TestBattery"),
+
+    ("battery: re-probe the supply directory every tick", "collect.py",
+     "    if _batt_dir is None:",
+     "    if True:",
+     "TestBattery"),
+
+    ("battery: pick a non-deterministic cell", "collect.py",
+     "            for name in sorted(os.listdir(POWER_SUPPLY)):",
+     "            for name in reversed(sorted(os.listdir(POWER_SUPPLY))):",
+     "TestBattery"),
+
+    ("battery: refresh too slowly to be live", "collect.py",
+     "        if not self._batt_at or now - self._batt_at > 2.0:",
+     "        if not self._batt_at or now - self._batt_at > 600.0:",
+     "TestCachedSources"),
 ]
 
 

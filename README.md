@@ -15,6 +15,7 @@ Everything comes straight from `/proc` and `/sys` — pulse never shells out.
 |---|---|---|
 | Install | compile or package manager | copy a folder, run it |
 | PSI pressure stall | no | yes — `cpu`/`mem`/`io` saturation |
+| Battery watts | yes, but amps mislabelled as watts | yes — current paired with voltage |
 | Per-device disk util% + queue depth | partial | yes |
 | Cumulative network use since boot | no | yes |
 | Listening sockets view | no | yes — `L` |
@@ -118,6 +119,55 @@ down, not only at reboot.
 
 Every interface is still recorded in `--json` output.
 
+## Battery
+
+When the machine has a cell, the header shows the charge level and what is
+flowing through it, next to the clock:
+
+```
+bat: 96% ↓ 6.10W        on battery
+bat: 96% ↑ 61.4W        charging
+bat: 100%              plugged in, nothing flowing
+```
+
+The arrow is direction and the watts are the flow through the cell, read from
+the same place btop reads: `/sys/class/power_supply`.
+
+One difference, and it matters. btop reads `power_now` and `current_now` but
+never `voltage_now`, so on a cell that publishes no `power_now` it divides
+microamps by a million and prints the result as watts. That is amps wearing a
+watt label. The battery that makes btop say `5.21W` is pushing 5.21 A at
+11.777 V, which is **61.4 W** — out by a factor of twelve. pulse pairs the
+current with the voltage.
+
+`power_now` is used when the driver publishes it, since it is already in
+microwatts. Counters that some drivers sign by direction are read as
+magnitudes, with the direction taken from `status`.
+
+A cell that is `Full`, `Not charging` or `Unknown` has nothing flowing through
+it, so the watts are omitted rather than read off a stale counter. Only the
+percentage is shown.
+
+There is no CPU-package reading, no RAPL, no estimate and no `sudo`. An earlier
+version had all of it, and it was worse: the numbers disagreed between
+privileged and unprivileged runs because they were quietly measuring different
+things, and the parts that needed root reported nothing at all on a normal
+launch. One number, one meaning, no setup.
+
+`--json` carries the same fields:
+
+```json
+"battery": {
+  "percent": 96,
+  "status": "Charging",
+  "watts": 61.358,
+  "direction": "in"
+}
+```
+
+`battery` is `null` on a machine with no cell, and `direction` is `""` whenever
+nothing is flowing.
+
 ## Refresh rate
 
 One rate for everything — graphs, meters and the process list all sample
@@ -182,9 +232,9 @@ interpreter itself.
   never split.
 - **Cached slow data.** Filesystem usage is refreshed every 5 s (a `statvfs` can
   block outright on a stalled NFS mount), mount tables every 10 s, temperature
-  sensors every 2 s, battery every 15 s. Things that cannot change — which cores
+  sensors every 2 s, battery every 2 s. Things that cannot change — which cores
   expose cpufreq, an interface's link speed, whether a block device is a whole
-  disk — are probed once.
+  disk, which supply is the battery — are probed once.
 
 ## Layout
 
@@ -232,7 +282,7 @@ your terminal or desyncs the cell grid.
 ## Tests
 
 ```
-python3 -m unittest test_pulse      # 164 tests, ~45s
+python3 -m unittest test_pulse      # 179 tests, ~45s
 python3 mutate_check.py             # proves the suite catches regressions
 ```
 
@@ -246,6 +296,9 @@ go beyond ordinary unit tests:
   renderer never skips an update.
 - A **fake `/proc`** makes PID reuse, permission denials, vanishing processes,
   truncated files and command names like `evil ) name` deterministic.
+- A **throwaway `/sys/class/power_supply`** gives the battery reader real files,
+  so the unit pairing, signed counters, idle cells and missing fields are all
+  exercised on hardware nobody has to own.
 - The real binary is driven through a **pty**, resized mid-session, and sent
   every key and mouse event.
 

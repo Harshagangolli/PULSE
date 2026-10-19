@@ -58,6 +58,12 @@ def hrate(n: float, pad: int = 0) -> str:
     return (hbytes(n) + "/s").rjust(pad)
 
 
+def hwatts(w: float) -> str:
+    if w < 10:
+        return "%.2fW" % w
+    return "%.1fW" % w if w < 100 else "%.0fW" % w
+
+
 def hduration(sec: float) -> str:
     sec = int(max(0, sec))
     d, sec = divmod(sec, 86400)

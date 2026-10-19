@@ -17,6 +17,7 @@ import json
 import os
 import random
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -861,9 +862,10 @@ class TestCachedSources(unittest.TestCase):
                                side_effect=AssertionError("read every tick")):
             s.sample()
         s._batt_at = time.monotonic() - 60.0
-        with mock.patch.object(C, "read_battery", return_value=(55, "Charging")):
+        row = (55, "Charging", 61.4, "in")
+        with mock.patch.object(C, "read_battery", return_value=row):
             s.sample()
-        self.assertEqual(s.battery, (55, "Charging"))
+        self.assertEqual(s.battery, row)
 
     def test_temps_cached_even_without_sensors(self):
         s = fresh_sampler()
@@ -890,6 +892,142 @@ class TestCachedSources(unittest.TestCase):
         temps = [("fan", 10.0), ("Package id 0", 55.0), ("Core 0", 50.0)]
         self.assertEqual(C.pick_cpu_temp(temps), 55.0)
         self.assertEqual(C.pick_cpu_temp([]), 0.0)
+
+
+class FakeSupply:
+    """A throwaway /sys/class/power_supply, so the collector reads real files."""
+
+    def __init__(self):
+        self.root = tempfile.mkdtemp()
+        self.saved = C.POWER_SUPPLY
+
+    def w(self, path, val):
+        p = os.path.join(self.root, path)
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        with open(p, "w") as f:
+            f.write(str(val) + "\n")
+        return p
+
+    def use(self, present=True):
+        C.POWER_SUPPLY = self.root if present else os.path.join(self.root, "gone")
+        C._batt_dir = None
+
+    def close(self):
+        C.POWER_SUPPLY = self.saved
+        C._batt_dir = None
+        shutil.rmtree(self.root, ignore_errors=True)
+
+
+class TestBattery(unittest.TestCase):
+    """mercuryBox shape: current_now + voltage_now, no power_now."""
+
+    def setUp(self):
+        self.f = FakeSupply()
+        self.addCleanup(self.f.close)
+
+    def cell(self, **kw):
+        f = self.f
+        f.w("BAT1/type", "Battery")
+        for k, v in kw.items():
+            f.w("BAT1/" + k, v)
+        f.use()
+        return C.read_battery()
+
+    def test_no_supply_directory(self):
+        self.f.use(present=False)
+        self.assertIsNone(C.read_battery())
+
+    def test_no_battery_among_supplies(self):
+        self.f.w("AC/type", "Mains")
+        self.f.w("AC/online", 1)
+        self.f.w("AC/capacity", 100)    # a charger is not a cell, whatever it publishes
+        self.f.use()
+        self.assertEqual(C.battery_dir(), "")
+        self.assertIsNone(C.read_battery())
+
+    def test_battery_without_capacity_is_not_reported(self):
+        self.f.w("BAT0/type", "Battery")
+        self.f.w("BAT0/status", "Discharging")
+        self.f.use()
+        self.assertIsNone(C.read_battery())
+
+    def test_power_now_is_microwatts(self):
+        got = self.cell(capacity=80, status="Discharging", power_now=18_500_000)
+        self.assertAlmostEqual(got[2], 18.5)
+        self.assertEqual(got[3], "out")
+
+    def test_current_needs_voltage_not_a_bare_divide(self):
+        """btop divides current_now by 1e6 and labels it W; that is amps."""
+        got = self.cell(capacity=96, status="Charging",
+                        current_now=5_210_000, voltage_now=11_777_000)
+        self.assertAlmostEqual(got[2], 61.358, places=2)
+        self.assertNotAlmostEqual(got[2], 5.21, places=2)
+        self.assertEqual(got[3], "in")
+
+    def test_current_without_voltage_reports_nothing(self):
+        got = self.cell(capacity=50, status="Discharging", current_now=518_000)
+        self.assertEqual(got[2], 0.0)
+
+    def test_power_now_wins_over_current(self):
+        got = self.cell(capacity=50, status="Discharging", power_now=9_000_000,
+                        current_now=5_210_000, voltage_now=11_777_000)
+        self.assertAlmostEqual(got[2], 9.0)
+
+    def test_signed_counters_are_magnitudes(self):
+        """Some drivers sign the counter by direction; status is the truth."""
+        got = self.cell(capacity=60, status="Discharging", power_now=-7_250_000)
+        self.assertAlmostEqual(got[2], 7.25)
+        self.assertEqual(got[3], "out")
+
+    def test_idle_states_report_no_flow(self):
+        for status in ("Full", "Not charging", "Unknown", ""):
+            got = self.cell(capacity=100, status=status, power_now=12_000_000,
+                            current_now=5_210_000, voltage_now=11_777_000)
+            self.assertEqual(got[2], 0.0, status)
+            self.assertEqual(got[3], "", status)
+
+    def test_percent_and_status_pass_through(self):
+        got = self.cell(capacity=96, status="Charging")
+        self.assertEqual(got[0], 96)
+        self.assertEqual(got[1], "Charging")
+
+    def test_reports_only_level_and_flow(self):
+        got = self.cell(capacity=96, status="Discharging", power_now=6_000_000,
+                        charge_now=4_000_000, charge_full=4_170_000)
+        self.assertEqual(len(got), 4)
+
+    def test_no_crash_on_garbage_values(self):
+        got = self.cell(capacity=50, status="Discharging", power_now="junk",
+                        charge_now="", charge_full="x")
+        self.assertEqual(got[0], 50)
+        self.assertEqual(got[2], 0.0)
+
+    def test_battery_dir_is_probed_once(self):
+        self.cell(capacity=50, status="Discharging", power_now=1_000_000)
+        with mock.patch.object(os, "listdir",
+                               side_effect=AssertionError("re-probed supplies")):
+            self.assertEqual(C.read_battery()[0], 50)
+
+    def test_first_battery_wins_deterministically(self):
+        f = self.f
+        f.w("BAT1/type", "Battery"); f.w("BAT1/capacity", 70)
+        f.w("BAT1/status", "Discharging"); f.w("BAT1/power_now", 7_000_000)
+        f.w("BAT0/type", "Battery"); f.w("BAT0/capacity", 30)
+        f.w("BAT0/status", "Discharging"); f.w("BAT0/power_now", 3_000_000)
+        f.use()
+        self.assertEqual(C.read_battery()[0], 30)      # sorted order
+
+    def test_sampler_exposes_no_power_attributes(self):
+        """The RAPL/hwmon/estimate machinery is gone, not merely unused."""
+        s = C.Sampler()
+        for attr in ("power", "power_src", "power_parts", "power_blocked",
+                     "power_rest", "power_cal", "rapl_prev", "batt_flow"):
+            self.assertFalse(hasattr(s, attr), attr)
+        for name in ("read_rapl", "rapl_zones", "rapl_blocked",
+                     "read_power_sensors", "read_mains_power",
+                     "read_battery_flow", "POWERCAP", "HWMON"):
+            self.assertFalse(hasattr(C, name), name)
+        self.assertNotIn("power", s.hist)
 
 
 class TestScreenPrimitives(unittest.TestCase):
@@ -1276,7 +1414,12 @@ class TestGroundTruth(unittest.TestCase):
         with open("/proc/loadavg") as f:
             p = f.read().split()
         self.assertAlmostEqual(self.s.load[0], float(p[0]), delta=2.0)
-        self.assertEqual(self.s.load[4], int(p[3].split("/")[1]))
+        # last_pid advances as processes spawn, so it is only ever bracketed
+        before = int(p[3].split("/")[1])
+        got = C.read_load()[4]
+        with open("/proc/loadavg") as f:
+            after = int(f.read().split()[3].split("/")[1])
+        self.assertTrue(before <= got <= after, (before, got, after))
 
     def test_memory_matches_meminfo(self):
         m = {}

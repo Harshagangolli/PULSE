@@ -12,9 +12,11 @@ HZ = os.sysconf("SC_CLK_TCK")
 PAGE = os.sysconf("SC_PAGESIZE")
 SECTOR = 512
 HIST = 1024
+POWER_SUPPLY = "/sys/class/power_supply"
 
 _CTRL = {c: 32 for c in range(32)}
 _CTRL[127] = 32
+_batt_dir: str | None = None
 
 
 def sanitize(s: str) -> str:
@@ -552,19 +554,48 @@ def read_uptime() -> float:
         return 0.0
 
 
+def battery_dir() -> str:
+    """Path of the first battery, or "". Probed once; batteries are not hotplug."""
+    global _batt_dir
+    if _batt_dir is None:
+        _batt_dir = ""
+        try:
+            for name in sorted(os.listdir(POWER_SUPPLY)):
+                base = POWER_SUPPLY + "/" + name
+                if _read(base + "/type").strip() == "Battery":
+                    _batt_dir = base
+                    break
+        except OSError:
+            pass
+    return _batt_dir
+
+
+def _battery_watts(base: str) -> float:
+    """Power through the cell, in watts.
+
+    power_now is already microwatts. current_now is microamps and needs the
+    voltage with it: dividing it by a million on its own yields amps wearing a
+    watt label, which is what btop prints on a cell that has no power_now.
+    """
+    uw = _readint(base + "/power_now", 0)
+    if uw:
+        return abs(uw) / 1e6
+    ua = _readint(base + "/current_now", 0)
+    uv = _readint(base + "/voltage_now", 0)
+    return abs(ua) * uv / 1e12 if ua and uv else 0.0
+
+
 def read_battery():
-    try:
-        for name in sorted(os.listdir("/sys/class/power_supply")):
-            base = "/sys/class/power_supply/" + name
-            if _read(base + "/type").strip() != "Battery":
-                continue
-            cap = _readint(base + "/capacity", -1)
-            if cap < 0:
-                continue
-            return cap, _read(base + "/status").strip()
-    except OSError:
-        pass
-    return None
+    """(percent, status, watts, direction), or None."""
+    base = battery_dir()
+    if not base:
+        return None
+    cap = _readint(base + "/capacity", -1)
+    if cap < 0:
+        return None
+    status = _read(base + "/status").strip()
+    direction = {"Charging": "in", "Discharging": "out"}.get(status, "")
+    return cap, status, _battery_watts(base) if direction else 0.0, direction
 
 
 # ------------------------------------------------------------------ processes
@@ -685,7 +716,10 @@ class Sampler:
         return self._temps
 
     def _battery(self, now: float):
-        if now - self._batt_at > 15.0 or not self._batt_at:
+        # Short enough that the watts figure tracks the machine, long enough
+        # that a five-file read is not repeated for nothing: ACPI itself only
+        # refreshes these every few seconds.
+        if not self._batt_at or now - self._batt_at > 2.0:
             self._batt_at = now
             self._batt = read_battery()
         return self._batt

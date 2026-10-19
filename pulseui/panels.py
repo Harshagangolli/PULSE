@@ -8,8 +8,8 @@ import time
 from . import collect as C
 from . import palette as P
 from .draw import (BAR, SOFT, clamp, frame, gridlines, hbytes, hcputime,
-                   hduration, heatstrip, hrate, hrule, hspan, meter, plot,
-                   scrollbar, stacked, trunc)
+                   hduration, heatstrip, hrate, hrule, hspan, hwatts, meter,
+                   plot, scrollbar, stacked, trunc)
 from .term import A_BOLD, Rect, Screen
 
 SEP = "\u00b7"
@@ -84,8 +84,13 @@ def header(scr: Screen, r: Rect, s: C.Sampler, app) -> None:
     if s.container:
         right.append(("", s.container, P.MUTED))
     if s.battery:
-        right.append(("bat", "%d%%" % s.battery[0],
-                      P.status(1.0 - s.battery[0] / 100.0)))
+        pct, _status, watts, direction = s.battery
+        txt = "%d%%" % pct
+        if direction:
+            txt += " %s" % ("\u2191" if direction == "in" else "\u2193")
+        if watts:
+            txt += " " + hwatts(watts)
+        right.append(("bat", txt, P.status(1.0 - pct / 100.0)))
     redge = clock_x - pause_w - 2
     rx = redge - _bits_w(right) + 1
     if rx > brand_x + len(BRAND) + 1:
@@ -177,7 +182,7 @@ def cpu(scr: Screen, r: Rect, s: C.Sampler, app) -> None:
             continue
         x = _field(scr, x, y, name, "%.1f%%" % v, P.value(v / 100.0), lim)
     if s.freq and x + 10 < lim:
-        _field(scr, x, y, "freq", "%.1fGHz" % (s.freq / 1000.0), P.MUTED, lim)
+        x = _field(scr, x, y, "freq", "%.1fGHz" % (s.freq / 1000.0), P.MUTED, lim)
 
     y += 1
     x = inner.x

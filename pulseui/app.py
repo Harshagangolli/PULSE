@@ -515,6 +515,9 @@ def snapshot(s: C.Sampler) -> dict:
                                 (round(v, 2) for v in s.cpu_mix)))},
         "load": {"1m": s.load[0], "5m": s.load[1], "15m": s.load[2],
                  "running": s.load[3]},
+        "battery": ({"percent": s.battery[0], "status": s.battery[1],
+                     "watts": round(s.battery[2], 3), "direction": s.battery[3]}
+                    if s.battery else None),
         "pressure": {k: {"some_avg10": v[0], "full_avg10": v[1]}
                      for k, v in s.psi.items()},
         "memory": s.mem,
